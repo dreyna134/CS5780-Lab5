@@ -32,9 +32,18 @@
 /* Private define ------------------------------------------------------------*/
 
 /* USER CODE BEGIN PD */
+
+int Get_X(void);
+int Get_Y(void);
+
+void Close_I2C2_Connection(void);
+void Check_I2C2_Read_Ready(void);
+void Check_I2C2_Write_Ready(void);
 void AwaitTC(void);
 void SetupI2C2_Read(void);
+void SetupI2C2_Read_LH(void);
 void SetupI2C2_Write(void);
+void SetupI2C2_Write_CONFIG(void);
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -138,70 +147,164 @@ int main(void)
 	I2C2->CR1 |= (1 << 0); // I2C2 ENABLED, CONFIG LOCKED
 	/* END I2C2 CONFIG */
 	
+	
+	// Begin I2C connection
+	
+	/* CTRL_REG1 CONFIG */
+	SetupI2C2_Write_CONFIG();
+	Check_I2C2_Write_Ready();
+	I2C2->TXDR = 0x20; // Transmit to CTRL_REG1
 
-	/* I2C2 Comms Config */
-	SetupI2C2_Write();
-	/* END I2C2 Comms Config */
-	
-	unsigned int nackfMask = (1 << 4);
-	unsigned int txisMask = (1 << 1);
-	
+	Check_I2C2_Write_Ready();
+	I2C2->TXDR = 0x0b; // PD to 1, Xen to 1, Yen to 1
+	AwaitTC();
+	Close_I2C2_Connection();
+	/* END CTRL_REG1 CONFIG */
+
+	//GPIOC->ODR |= (1 << 9); // Green LED ON to indicate successful config
 	
 	/* MAIN RUNNING LOOP */
   while (1)
   {
-		HAL_Delay(500);
+		HAL_Delay(100);
 		
-		// Establish connection
-		unsigned int txis = I2C2->ISR & txisMask;
-		unsigned int nackf = I2C2->ISR & nackfMask;
-		if (nackf == nackfMask) // Connection Error
-			GPIOC->ODR |= (1 << 6); // Turn on RED LED, indicates connection error
-		if (txis != txisMask) // Slave did not respond yet
-		{ 
-			GPIOC->ODR ^= (1 << 8); // blink Orange LED, indicates slave yet to respond
-			continue;
-		}
-			GPIOC->ODR |= (1 << 7); // Turn on Blue LED, indicates connection
+		volatile short x = Get_X();
+		volatile short y = Get_Y();
 		
-		// Successful connection established.
-		// Write to slave
-		I2C2->TXDR |= 0x0F; // WHO_AM_I addr
-		// Await TC (transfer complete)
-		AwaitTC();
-		
-		// Read from slave
-		SetupI2C2_Read();
-		nackf = I2C2->ISR & nackfMask;
-		unsigned int rxneMask = (1 << 2);
-		unsigned int rxne = I2C2->ISR & rxneMask;
-		while (nackf == nackfMask){
-			HAL_Delay(250);
-			GPIOC->ODR ^= (1 << 6); // Connection error, blink Red
-		}
-		while (rxne != rxneMask){
-			HAL_Delay(250);
-			rxne = I2C2->ISR & rxneMask;
-			GPIOC->ODR ^= (1 << 8); // Awaiting response, blink Orange
-		}
-		// Data received, await full transfer
-		AwaitTC();
-		
-		// Check received data, if match to 0xD4, green LED on!
-		unsigned int rawResult = I2C2->RXDR;
-		unsigned int result = rawResult & ~(0xFFFFFF00);
-		if (result == 0xD3 || rawResult == 0xD3)
-			GPIOC->ODR |= (1 << 9); // Green On, successful!
+		if (x > 300)
+			GPIOC->ODR |= (1 << 8); // Orange
 		else
-			GPIOC->ODR |= (1 << 6); // Red on, unsuccessful
+			GPIOC->ODR &= ~(1 << 8);
+		if (x < -300)
+			GPIOC->ODR |= (1 << 9); // Green
+		else
+			GPIOC->ODR &= ~(1 << 9);
 		
-		I2C2->CR2 |= (1 << 14); // Release I2C bus; STOP bit to 1
-		while(1);
-		
+		if (y > 300)
+			GPIOC->ODR |= (1 << 6); // Red
+		else
+			GPIOC->ODR &= ~(1 << 6);
+		if (y < -300)
+			GPIOC->ODR |= (1 << 7); // Blue
+		else
+			GPIOC->ODR &= ~(1 << 7);
   }
 }
 
+/*
+ * Retrieves the X data from the Gyroscope's OUT_X_L and OUT_X_H registers.
+ * Returns a signed short representing X axis movement.
+ */
+int Get_X()
+{
+	// X_Low
+	SetupI2C2_Write();
+	Check_I2C2_Write_Ready();
+	I2C2->TXDR |= 0xA8; // Read OUT_X_L
+	AwaitTC();
+	
+	SetupI2C2_Read_LH(); // Read 2 bytes at a time per transaction!
+	Check_I2C2_Read_Ready();
+	volatile short raw_xLow = I2C2->RXDR & 0xFF;
+	
+	// X_Hi
+	Check_I2C2_Read_Ready();
+	volatile short raw_xHi = I2C2->RXDR & 0xFF;
+	AwaitTC();
+	Close_I2C2_Connection();
+	
+	volatile short x = (raw_xLow << 8) | raw_xHi;
+	return x;
+}
+
+/*
+ * Retrieves the Y data from the Gyroscope's OUT_Y_L and OUT_Y_H registers.
+ * Returns a signed short representing Y axis movement.
+ */
+int Get_Y()
+{
+	// Y_Low
+	SetupI2C2_Write();
+	Check_I2C2_Write_Ready();
+	I2C2->TXDR |= 0xAA; // Read OUT_Y_L
+	AwaitTC();
+	
+	SetupI2C2_Read_LH(); // Read 2 bytes at a time per transaction!
+	Check_I2C2_Read_Ready();
+	unsigned int raw_yLow = I2C2->RXDR & 0xFF;
+	
+	// Y_Hi
+	Check_I2C2_Read_Ready();
+	unsigned int raw_yHi = I2C2->RXDR & 0xFF;
+	AwaitTC();
+	Close_I2C2_Connection();
+	
+	short y = (raw_yLow << 8) | raw_yHi;
+	return y;
+}
+
+/*
+ * Sets the STOP bit in I2C2->CR2. Indicates end of a transaction.
+ */ 
+void Close_I2C2_Connection(void)
+{
+	//GPIOC->ODR &= ~(1 << 7); // Blue LED off
+	I2C2->CR2 |= (1 << 14); // Release I2C bus; STOP bit to 1
+}
+
+/*
+ * A waiting function that waits for RXNE bit
+ * to be set. 
+ * Intended to check if RXDR is ready to be read from.
+ */
+void Check_I2C2_Read_Ready(void)
+{
+	unsigned int nackfMask = (1 << 4);
+	unsigned int nackf = I2C2->ISR & nackfMask;
+	unsigned int rxneMask = (1 << 2);
+	unsigned int rxne = I2C2->ISR & rxneMask;
+	
+	while (nackf == nackfMask){
+		HAL_Delay(250);
+		GPIOC->ODR ^= (1 << 6); // Connection error, blink Red
+	}
+	while (rxne != rxneMask){
+		HAL_Delay(250);
+		rxne = I2C2->ISR & rxneMask;
+		//GPIOC->ODR ^= (1 << 8); // Waiting for some data, blink Orange
+	}
+}
+
+/*
+ * A waiting function that waits for TXIS bit
+ * to be set. 
+ * Intended to check if TXDR is ready to be written to.
+ */
+void Check_I2C2_Write_Ready(void)
+{
+	/* I2C CONNECTION CHECK */
+	unsigned int nackfMask = (1 << 4);
+	unsigned int txisMask = (1 << 1);
+	
+	unsigned int txis = I2C2->ISR & txisMask;
+	unsigned int nackf = I2C2->ISR & nackfMask;
+	if (nackf == nackfMask) // Connection Error
+	{
+		GPIOC->ODR |= (1 << 6); // Turn on RED LED, indicates connection error
+		while(1);
+	}
+	while (txis != txisMask) // Slave did not respond yet
+	{ 
+		HAL_Delay(250);
+		txis = I2C2->ISR & txisMask;
+		//GPIOC->ODR ^= (1 << 8); // blink Orange LED, indicates slave yet to respond
+	}
+	//GPIOC->ODR &= ~(1 << 8); // Orange LED off
+	/* END I2C CONNECTION CHECK */
+}
+
 /* 
+ * Await Transfer Complete
  * Waits for the TC bit in I2C2_ISR to be a 1
  * Blinks Orange LED until done
  */
@@ -210,32 +313,57 @@ void AwaitTC(void)
 	unsigned int tcMask = (1 << 6);
 	while((I2C2->ISR & tcMask) != tcMask){
 			HAL_Delay(50);
-			GPIOC->ODR ^= (1 << 8); // Blink Orange while waiting
+			//GPIOC->ODR ^= (1 << 8); // Blink Orange while waiting
 		}
-		GPIOC->ODR &= ~(1 << 8);	// Orange off
+		//GPIOC->ODR &= ~(1 << 8);	// Orange off
 }
 
-/* 
- * Sets up CR2 parameters, with RD_WRN set to read
- */
-void SetupI2C2_Read(void)
+/*
+ * Sets up CR2 Params, with RD_WRN set to read, and NBYTES to 2
+ * Intended to setup all params and set START for a transaction.
+ */ 
+void SetupI2C2_Read_LH(void)
 {
+	HAL_Delay(1);
 	I2C2->CR2 &= ~(0x3FF);
 	I2C2->CR2 |= (0x69 << 1); // SADD: Slave address set
 	
 	I2C2->CR2 &= ~(0xFF << 16);
-	I2C2->CR2 |= (1 << 16); // NBYTES: 1 byte to send
+	I2C2->CR2 |= (2 << 16); // NBYTES: 2 bytes to receive
 	
 	I2C2->CR2 |= (1 << 10); // RD_WRN: 1 -> Master requests read transfer
 	
 	I2C2->CR2 |= (1 << 13); // START: ENABLED
+	//GPIOC->ODR |= (1 << 7);
 }
 
+/* 
+ * Sets up CR2 parameters, with RD_WRN set to read
+ * Intended to setup all params, and set START for a transaction.
+ */
+void SetupI2C2_Read(void)
+{
+	HAL_Delay(1);
+	I2C2->CR2 &= ~(0x3FF);
+	I2C2->CR2 |= (0x69 << 1); // SADD: Slave address set
+	
+	I2C2->CR2 &= ~(0xFF << 16);
+	I2C2->CR2 |= (1 << 16); // NBYTES: 1 byte to receive
+	
+	I2C2->CR2 |= (1 << 10); // RD_WRN: 1 -> Master requests read transfer
+	
+	I2C2->CR2 |= (1 << 13); // START: ENABLED
+	//GPIOC->ODR |= (1 << 7);
+}
+
+
 /*
- * Sets up CR2 parameters, with RD_WRN set to write
+ * Sets up CR2 Params, with RD_WRN set to write
+ * Intended to setup all params and set START for a transaction.
  */
 void SetupI2C2_Write(void)
 {
+	HAL_Delay(1);
 	I2C2->CR2 &= ~(0x3FF);
 	I2C2->CR2 |= (0x69 << 1); // SADD: Slave address set
 	
@@ -245,7 +373,28 @@ void SetupI2C2_Write(void)
 	I2C2->CR2 &= ~((1 << 10)); // RD_WRN: 0 -> Master requests write transfer
 	
 	I2C2->CR2 |= (1 << 13); // START: ENABLED
+	//GPIOC->ODR |= (1 << 7);
 }
+
+/*
+ * Sets up CR2 Params, with RD_WRN set to write, and NBYTES to 2
+ * Intended to setup params and allow for 2 bytes to be written.
+ */ 
+void SetupI2C2_Write_CONFIG(void)
+{
+	HAL_Delay(1);
+	I2C2->CR2 &= ~(0x3FF);
+	I2C2->CR2 |= (0x69 << 1); // SADD: Slave address set
+	
+	I2C2->CR2 &= ~(0xFF << 16);
+	I2C2->CR2 |= (1 << 17); // NBYTES: 2 bytes to send
+	
+	I2C2->CR2 &= ~((1 << 10)); // RD_WRN: 0 -> Master requests write transfer
+	
+	I2C2->CR2 |= (1 << 13); // START: ENABLED
+	//GPIOC->ODR |= (1 << 7);
+}
+
 
 /**
   * @brief System Clock Configuration
